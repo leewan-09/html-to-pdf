@@ -10,7 +10,10 @@ app.post('/', zValidator('json', pdfQuerySchema), async (c) => {
   const { name, url } = c.req.valid('json');
   console.log(`Generating PDF for ${name} from ${url}`);
 
-  const browser = await puppeteer.launch({ headless: true });
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox'],
+  });
   const page = await browser.newPage();
   await page.goto(url);
   const pdf = await page.pdf({ format: 'A4', printBackground: true });
