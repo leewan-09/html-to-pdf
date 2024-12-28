@@ -12,7 +12,7 @@ app.post('/', zValidator('json', pdfQuerySchema), async (c) => {
 
   const browser = await puppeteer.launch({
     headless: true,
-    args: ['--no-sandbox'],
+    args: ['--no-sandbox', '--timezone="Indian/Maldives"'],
   });
   const page = await browser.newPage();
   await page.goto(url);
