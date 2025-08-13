@@ -1,8 +1,0 @@
-services:
-  web:
-    build: .
-    environment:
-      - NODE_ENV=production
-      - PORT=4000
-    ports:
-      - '4000:4000'
