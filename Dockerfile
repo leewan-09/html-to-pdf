@@ -14,10 +14,8 @@ FROM chef AS builder
 
 # Install build dependencies
 RUN apt-get update && \
-    apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+    apt-get install -y pkg-config libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 # Build dependencies (cached unless Cargo.toml changes)
 COPY --from=planner /app/recipe.json recipe.json
@@ -35,90 +33,46 @@ ENV CARGO_PROFILE_RELEASE_OPT_LEVEL=3
 RUN cargo build --release && \
     strip /app/target/release/html-to-pdf-rust
 
-# Stage 4: Runtime with minimal attack surface
+# Stage 4: Runtime
 FROM debian:bookworm-slim AS runtime
 
-# Install base dependencies first
+# Install Chrome and dependencies in one layer
 RUN apt-get update && \
-    apt-get install -y \
-    wget \
-    gnupg \
-    ca-certificates \
-    curl \
-    apt-transport-https \
-    --no-install-recommends && \
-    # Add Chrome repository with HTTPS URL
+    apt-get install -y wget gnupg ca-certificates && \
     wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | \
     gpg --dearmor -o /usr/share/keyrings/googlechrome-linux-keyring.gpg && \
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome-linux-keyring.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google.list && \
-    apt-get update
+    apt-get update && \
+    apt-get install -y \
+        google-chrome-stable \
+        fonts-liberation \
+        fonts-noto-cjk \
+        --no-install-recommends && \
+    # Cleanup but keep Chrome
+    apt-mark manual google-chrome-stable && \
+    apt-get purge -y wget gnupg && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    # Verify Chrome is installed
+    google-chrome-stable --version
 
-# Install Chrome and dependencies separately for better error handling
-RUN apt-get install -y \
-    google-chrome-stable \
-    fonts-liberation \
-    fonts-noto-cjk \
-    fonts-noto-color-emoji \
-    libnss3 \
-    libxss1 \
-    libasound2 \
-    libxtst6 \
-    libatspi2.0-0 \
-    libgtk-3-0 \
-    libgbm1 \
-    libx11-xcb1 \
-    libxcb-dri3-0 \
-    --no-install-recommends && \
-    # Verify Chrome installation explicitly
-    test -f /usr/bin/google-chrome-stable || (echo "Chrome installation failed" && exit 1) && \
-    /usr/bin/google-chrome-stable --version && \
-    # Clean up
-    apt-get purge -y wget gnupg apt-transport-https && \
-    apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
+# Set Chrome environment variable for the Rust app
+ENV CHROME_PATH=/usr/bin/google-chrome-stable
 
-# Create Chrome wrapper script after verifying Chrome exists
-RUN test -f /usr/bin/google-chrome-stable && \
-    echo '#!/bin/sh' > /usr/local/bin/chrome-wrapper && \
-    echo 'exec /usr/bin/google-chrome-stable --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --disable-gpu "$@"' >> /usr/local/bin/chrome-wrapper && \
-    chmod 755 /usr/local/bin/chrome-wrapper && \
-    # Create symlink for chrome
-    ln -sf /usr/local/bin/chrome-wrapper /usr/local/bin/chrome && \
-    # Verify wrapper works
-    /usr/local/bin/chrome-wrapper --version || (echo "Chrome wrapper verification failed" && exit 1)
-
-# Set Chrome path to use the wrapper
-ENV CHROME_PATH=/usr/local/bin/chrome-wrapper
-
-# Create non-root user with specific UID/GID
+# Create non-root user
 RUN groupadd -r -g 1001 appuser && \
-    useradd -r -u 1001 -g appuser \
-    -d /home/appuser \
-    -s /sbin/nologin \
-    -c "Application user" appuser && \
+    useradd -r -u 1001 -g appuser -d /home/appuser -s /sbin/nologin appuser && \
     mkdir -p /home/appuser && \
-    chown -R appuser:appuser /home/appuser
+    chown -R appuser:appuser /home/appuser && \
+    # Ensure /tmp is writable for Chrome user data dirs
+    chmod 1777 /tmp
 
 # Copy binary
 COPY --from=builder --chown=appuser:appuser /app/target/release/html-to-pdf-rust /usr/local/bin/html-to-pdf-rust
 
-# Create necessary directories for Chrome with proper permissions
-RUN mkdir -p /home/appuser/.cache/chromium && \
-    mkdir -p /home/appuser/.local/share && \
-    mkdir -p /home/appuser/.config && \
-    mkdir -p /tmp/.X11-unix && \
-    chmod 1777 /tmp/.X11-unix && \
-    chown -R appuser:appuser /home/appuser/.cache && \
-    chown -R appuser:appuser /home/appuser/.local && \
-    chown -R appuser:appuser /home/appuser/.config
-
-# Security: Drop capabilities
+# Switch to non-root user
 USER appuser
 WORKDIR /home/appuser
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:5000/health || exit 1
 
 EXPOSE 5000
 
