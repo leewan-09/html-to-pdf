@@ -5,6 +5,21 @@ use futures_util::stream::StreamExt;
 use std::sync::Arc;
 use tokio::time::timeout;
 use std::time::Duration;
+use std::path::Path;
+use std::process::Command;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ChromePathError {
+    #[error("Chrome binary not found at path: {path}")]
+    NotFound { path: String },
+    #[error("Chrome binary is not executable: {path}")]
+    NotExecutable { path: String },
+    #[error("Chrome binary validation failed: {path}, error: {error}")]
+    ValidationFailed { path: String, error: String },
+    #[error("No valid Chrome installation found. Tried paths: {paths:?}")]
+    NoValidInstallation { paths: Vec<String> },
+}
 
 pub struct PdfService {
     browser: Arc<Browser>,
@@ -36,13 +51,97 @@ impl Drop for PageGuard {
 }
 
 impl PdfService {
+    /// Common Chrome installation paths to try as fallbacks
+    const CHROME_FALLBACK_PATHS: &'static [&'static str] = &[
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+        "/opt/google/chrome/chrome",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", // macOS
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",   // Windows
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe", // Windows 32-bit
+    ];
+
+    /// Validates that a Chrome binary path is accessible and executable
+    fn validate_chrome_path(path: &str) -> Result<String, ChromePathError> {
+        let path_buf = Path::new(path);
+        
+        // Check if the path exists
+        if !path_buf.exists() {
+            return Err(ChromePathError::NotFound {
+                path: path.to_string(),
+            });
+        }
+
+        // Check if it's executable by trying to run --version
+        match Command::new(path).arg("--version").output() {
+            Ok(output) => {
+                if output.status.success() {
+                    println!("Chrome validation successful: {}", String::from_utf8_lossy(&output.stdout).trim());
+                    Ok(path.to_string())
+                } else {
+                    Err(ChromePathError::NotExecutable {
+                        path: path.to_string(),
+                    })
+                }
+            }
+            Err(e) => Err(ChromePathError::ValidationFailed {
+                path: path.to_string(),
+                error: e.to_string(),
+            }),
+        }
+    }
+
+    /// Finds a valid Chrome installation by checking provided path and fallbacks
+    fn find_chrome_executable(provided_path: Option<String>) -> Result<String, ChromePathError> {
+        let mut tried_paths = Vec::new();
+
+        // First, try the provided path if available
+        if let Some(path) = provided_path {
+            tried_paths.push(path.clone());
+            match Self::validate_chrome_path(&path) {
+                Ok(validated_path) => {
+                    println!("Using provided Chrome path: {}", validated_path);
+                    return Ok(validated_path);
+                }
+                Err(e) => {
+                    eprintln!("Provided Chrome path failed validation: {}", e);
+                }
+            }
+        }
+
+        // Try fallback paths
+        println!("Trying fallback Chrome paths...");
+        for &fallback_path in Self::CHROME_FALLBACK_PATHS {
+            tried_paths.push(fallback_path.to_string());
+            match Self::validate_chrome_path(fallback_path) {
+                Ok(validated_path) => {
+                    println!("Using fallback Chrome path: {}", validated_path);
+                    return Ok(validated_path);
+                }
+                Err(_) => {
+                    // Continue to next fallback, don't log every failure
+                    continue;
+                }
+            }
+        }
+
+        eprintln!("No valid Chrome installation found. Tried paths: {:?}", tried_paths);
+        Err(ChromePathError::NoValidInstallation { paths: tried_paths })
+    }
     pub async fn new(chrome_path: Option<String>) -> Result<Self, Box<dyn std::error::Error>> {
         use std::time::{SystemTime, UNIX_EPOCH};
+        
+        // Find and validate Chrome executable
+        let validated_chrome_path = Self::find_chrome_executable(chrome_path)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
         
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
         let user_data_dir = format!("/tmp/chrome-rust-pdf-{}", timestamp);
         
-        let mut config = BrowserConfig::builder()
+        let config = BrowserConfig::builder()
+            .chrome_executable(&validated_chrome_path)
             .no_sandbox()
             .launch_timeout(std::time::Duration::from_secs(60))
             .args(vec![
@@ -62,10 +161,6 @@ impl PdfService {
                 format!("--user-data-dir={}", user_data_dir),
                 "--timezone=Indian/Maldives".to_string(),
             ]);
-
-        if let Some(path) = chrome_path {
-            config = config.chrome_executable(&path);
-        }
 
         let (browser, mut handler) = Browser::launch(config.build()?).await?;
         

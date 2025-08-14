@@ -23,8 +23,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     
     println!("Initializing PDF service...");
+    println!("Chrome path from environment: {:?}", config.chrome_path);
     let pdf_service = Arc::new(PdfService::new(config.chrome_path).await?);
-    
+    println!("PDF service initialized successfully!");
     let app = Router::new()
         .route("/", post(generate_pdf))
         .layer(
