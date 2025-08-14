@@ -76,8 +76,8 @@ RUN groupadd -r -g 1001 appuser && \
 # Copy binary
 COPY --from=builder --chown=appuser:appuser /app/target/release/html-to-pdf-rust /usr/local/bin/html-to-pdf-rust
 
-# Set Chrome path for chromiumoxide - use actual binary, not wrapper script
-ENV CHROME_PATH=/opt/google/chrome/chrome
+# Set Chrome path for chromiumoxide
+ENV CHROME_PATH=/usr/bin/google-chrome-stable
 
 # Security: Drop capabilities
 USER appuser
