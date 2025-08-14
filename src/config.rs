@@ -11,6 +11,10 @@ pub enum ConfigError {
 pub struct Config {
     pub port: u16,
     pub chrome_path: Option<String>,
+    pub rust_log: String,
+    pub allowed_origins: Vec<String>,
+    pub max_pdf_size_mb: usize,
+    pub request_timeout_seconds: u64,
 }
 
 impl Config {
@@ -31,7 +35,31 @@ impl Config {
         }
             
         let chrome_path = env::var("CHROME_PATH").ok();
+        let rust_log = env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
         
-        Ok(Self { port, chrome_path })
+        let allowed_origins = env::var("ALLOWED_ORIGINS")
+            .unwrap_or_else(|_| "*".to_string())
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+        
+        let max_pdf_size_mb = env::var("MAX_PDF_SIZE_MB")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .unwrap_or(10);
+        
+        let request_timeout_seconds = env::var("REQUEST_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()
+            .unwrap_or(30);
+        
+        Ok(Self { 
+            port, 
+            chrome_path,
+            rust_log,
+            allowed_origins,
+            max_pdf_size_mb,
+            request_timeout_seconds,
+        })
     }
 }

@@ -1,4 +1,43 @@
-node_modules
-README.md
+# Git
+.git
+.gitignore
+
+# Build artifacts
+target/
+Cargo.lock
+
+# Environment files
 .env
-.gitingore
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+docs/
+
+# Testing
+tests/
+benches/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+
+# Node.js (if any frontend)
+node_modules/

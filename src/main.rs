@@ -10,7 +10,9 @@ use pdf_service::PdfService;
 use axum::{
     routing::{post, get},
     Router,
+    response::Json,
 };
+use serde_json::json;
 use std::sync::Arc;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
@@ -31,8 +33,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_state(pdf_service);
 
-    // Add a health check route
-    let app = app.route("/health", get(|| async { "OK" }));
+    // Add a health check route with JSON response
+    let app = app.route("/health", get(|| async { 
+        Json(json!({
+            "status": "healthy",
+            "service": "html-to-pdf-rust",
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        }))
+    }));
 
 
     let addr = format!("0.0.0.0:{}", config.port);

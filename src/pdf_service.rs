@@ -1,11 +1,38 @@
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams;
+use chromiumoxide::page::Page;
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::time::timeout;
+use std::time::Duration;
 
 pub struct PdfService {
-    browser: Arc<Mutex<Browser>>,
+    browser: Arc<Browser>,
+}
+
+struct PageGuard {
+    page: Page,
+}
+
+impl PageGuard {
+    fn new(page: Page) -> Self {
+        Self { page }
+    }
+
+    async fn generate_pdf(&self, pdf_params: PrintToPdfParams) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        self.page.pdf(pdf_params).await.map_err(Into::into)
+    }
+}
+
+impl Drop for PageGuard {
+    fn drop(&mut self) {
+        let page = self.page.clone();
+        tokio::spawn(async move {
+            if let Err(e) = page.close().await {
+                eprintln!("Failed to close page: {}", e);
+            }
+        });
+    }
 }
 
 impl PdfService {
@@ -51,27 +78,34 @@ impl PdfService {
         });
 
         Ok(Self {
-            browser: Arc::new(Mutex::new(browser)),
+            browser: Arc::new(browser),
         })
     }
 
     pub async fn generate_pdf(&self, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let browser = self.browser.lock().await;
-        let page = browser.new_page(url).await?;
+        const PDF_TIMEOUT: Duration = Duration::from_secs(30);
         
-        page.goto(url).await?;
-        page.wait_for_navigation().await?;
-        
-        let pdf_params = PrintToPdfParams::builder()
-            .paper_width(8.27) // A4 width in inches
-            .paper_height(11.69) // A4 height in inches
-            .print_background(true)
-            .build();
+        let generate_with_timeout = async {
+            // Create a new page directly with the target URL
+            let page = self.browser.new_page(url).await?;
+            let page_guard = PageGuard::new(page);
+            
+            // Wait for the page to fully load
+            page_guard.page.wait_for_navigation().await?;
+            
+            let pdf_params = PrintToPdfParams::builder()
+                .paper_width(8.27) // A4 width in inches
+                .paper_height(11.69) // A4 height in inches
+                .print_background(true)
+                .build();
 
-        let pdf_data = page.pdf(pdf_params).await?;
-        
-        page.close().await?;
-        
-        Ok(pdf_data)
+            // Generate PDF using the guard which ensures cleanup
+            page_guard.generate_pdf(pdf_params).await
+        };
+
+        timeout(PDF_TIMEOUT, generate_with_timeout)
+            .await
+            .map_err(|_| -> Box<dyn std::error::Error> { "PDF generation timed out".into() })?
+
     }
 }

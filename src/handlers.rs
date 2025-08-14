@@ -6,6 +6,11 @@ use axum::response::IntoResponse;
 use std::sync::Arc;
 use regex::Regex;
 use thiserror::Error;
+use once_cell::sync::Lazy;
+
+static FILENAME_SANITIZER: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"[^a-zA-Z0-9._-]").expect("Invalid regex pattern for filename sanitization")
+});
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -30,27 +35,32 @@ impl IntoResponse for AppError {
         
         let error_response = ErrorResponse { error: error_message };
         match serde_json::to_string(&error_response) {
-            Ok(body) => Response::builder()
-                .status(status)
-                .header("Content-Type", "application/json")
-                .body(Body::from(body))
-                .unwrap_or_else(|_| {
-                    Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Body::from("Internal server error"))
-                        .unwrap()
-                }),
-            Err(_) => Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("Internal server error"))
-                .unwrap(),
+            Ok(body) => {
+                // Try to build the JSON response
+                Response::builder()
+                    .status(status)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap_or_else(|_| create_fallback_response())
+            },
+            Err(_) => create_fallback_response(),
         }
     }
 }
 
+fn create_fallback_response() -> Response {
+    // This is a safe fallback that cannot fail
+    let mut response = Response::new(Body::from("Internal server error"));
+    *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+    // Use a safe method to insert headers without unwrap
+    if let Ok(header_value) = "text/plain".parse() {
+        response.headers_mut().insert("Content-Type", header_value);
+    }
+    response
+}
+
 pub fn sanitize_filename(name: &str) -> String {
-    let re = Regex::new(r"[^a-zA-Z0-9._-]").unwrap();
-    let sanitized = re.replace_all(name, "_").to_string();
+    let sanitized = FILENAME_SANITIZER.replace_all(name, "_").to_string();
     
     // Limit length and ensure it's not empty
     let mut result = sanitized.chars().take(50).collect::<String>();
