@@ -18,7 +18,5 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.debug
-          push: false
-          tags: leewan98/html-to-pdf:debug
-          load: true
+          push: true
+          tags: leewan98/html-to-pdf:latest
