@@ -36,9 +36,13 @@ RUN cargo build --release && \
 # Stage 4: Runtime
 FROM debian:bookworm-slim AS runtime
 
-# Install Chrome and dependencies in one layer
+# Install Chrome and dependencies
 RUN apt-get update && \
-    apt-get install -y wget gnupg ca-certificates && \
+    apt-get install -y \
+        wget \
+        gnupg \
+        ca-certificates \
+        --no-install-recommends && \
     wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | \
     gpg --dearmor -o /usr/share/keyrings/googlechrome-linux-keyring.gpg && \
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome-linux-keyring.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google.list && \
@@ -48,9 +52,6 @@ RUN apt-get update && \
         fonts-liberation \
         fonts-noto-cjk \
         --no-install-recommends && \
-    # Cleanup but keep Chrome
-    apt-mark manual google-chrome-stable && \
-    apt-get purge -y wget gnupg && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     # Verify Chrome is installed
