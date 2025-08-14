@@ -38,29 +38,34 @@ RUN cargo build --release && \
 # Stage 4: Runtime with minimal attack surface
 FROM debian:bookworm-slim AS runtime
 
-# Install Chrome and minimal dependencies
+# Install dependencies for Chrome
 RUN apt-get update && \
     apt-get install -y \
     wget \
     gnupg \
     ca-certificates \
-    --no-install-recommends && \
-    wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | \
+    curl \
+    --no-install-recommends
+
+# Add Chrome repository
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | \
     gpg --dearmor -o /usr/share/keyrings/googlechrome-linux-keyring.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome-linux-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google.list && \
-    apt-get update && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome-linux-keyring.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google.list
+
+# Install Chrome and fonts
+RUN apt-get update && \
     apt-get install -y \
     google-chrome-stable \
     fonts-liberation \
     fonts-noto-cjk \
     fonts-noto-color-emoji \
-    curl \
     --no-install-recommends && \
     apt-get purge -y wget gnupg && \
     apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/* && \
-    # Create non-root user with specific UID/GID
-    groupadd -r -g 1001 appuser && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create non-root user with specific UID/GID
+RUN groupadd -r -g 1001 appuser && \
     useradd -r -u 1001 -g appuser \
     -d /home/appuser \
     -s /sbin/nologin \
@@ -71,8 +76,8 @@ RUN apt-get update && \
 # Copy binary
 COPY --from=builder --chown=appuser:appuser /app/target/release/html-to-pdf-rust /usr/local/bin/html-to-pdf-rust
 
-# Set Chrome path for chromiumoxide
-ENV CHROME_PATH=/usr/bin/google-chrome-stable
+# Set Chrome path for chromiumoxide - use actual binary, not wrapper script
+ENV CHROME_PATH=/opt/google/chrome/chrome
 
 # Security: Drop capabilities
 USER appuser
