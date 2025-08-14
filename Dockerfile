@@ -65,9 +65,13 @@ RUN apt-get update && \
     libgtk-3-0 \
     libgbm1 \
     --no-install-recommends && \
-    # Verify Chrome installation
+    # Verify Chrome installation and fix permissions
     which google-chrome-stable && \
     google-chrome-stable --version && \
+    # Ensure Chrome binary is executable
+    chmod 755 /usr/bin/google-chrome-stable && \
+    # Create a symlink for easier access
+    ln -sf /usr/bin/google-chrome-stable /usr/local/bin/chrome && \
     # Clean up
     apt-get purge -y wget gnupg && \
     apt-get autoremove -y && \
@@ -85,14 +89,25 @@ RUN groupadd -r -g 1001 appuser && \
 # Copy binary
 COPY --from=builder --chown=appuser:appuser /app/target/release/html-to-pdf-rust /usr/local/bin/html-to-pdf-rust
 
-# Set Chrome path for chromiumoxide
-ENV CHROME_PATH=/usr/bin/google-chrome-stable
+# Create Chrome wrapper script to handle sandbox issues
+RUN echo '#!/bin/sh' > /usr/local/bin/chrome-wrapper && \
+    echo 'exec /usr/bin/google-chrome-stable --no-sandbox --disable-setuid-sandbox "$@"' >> /usr/local/bin/chrome-wrapper && \
+    chmod 755 /usr/local/bin/chrome-wrapper && \
+    # Verify wrapper works
+    /usr/local/bin/chrome-wrapper --version
 
-# Create necessary directories for Chrome
+# Set Chrome path to use the wrapper
+ENV CHROME_PATH=/usr/local/bin/chrome-wrapper
+
+# Create necessary directories for Chrome with proper permissions
 RUN mkdir -p /home/appuser/.cache/chromium && \
     mkdir -p /home/appuser/.local/share && \
+    mkdir -p /home/appuser/.config && \
+    mkdir -p /tmp/.X11-unix && \
+    chmod 1777 /tmp/.X11-unix && \
     chown -R appuser:appuser /home/appuser/.cache && \
-    chown -R appuser:appuser /home/appuser/.local
+    chown -R appuser:appuser /home/appuser/.local && \
+    chown -R appuser:appuser /home/appuser/.config
 
 # Security: Drop capabilities
 USER appuser

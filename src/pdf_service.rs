@@ -67,29 +67,65 @@ impl PdfService {
     fn validate_chrome_path(path: &str) -> Result<String, ChromePathError> {
         let path_buf = Path::new(path);
         
-        // Check if the path exists
-        if !path_buf.exists() {
+        // Try to resolve symlinks
+        let resolved_path = if path_buf.exists() {
+            match std::fs::canonicalize(path_buf) {
+                Ok(p) => {
+                    println!("Resolved Chrome path: {} -> {}", path, p.display());
+                    p
+                },
+                Err(e) => {
+                    println!("Warning: Could not resolve symlink for {}: {}", path, e);
+                    path_buf.to_path_buf()
+                }
+            }
+        } else {
             return Err(ChromePathError::NotFound {
                 path: path.to_string(),
             });
-        }
+        };
 
-        // Check if it's executable by trying to run --version
-        match Command::new(path).arg("--version").output() {
+        // Check if it's executable by trying to run --version with no-sandbox for containers
+        let mut cmd = Command::new(&resolved_path);
+        cmd.arg("--version")
+           .arg("--no-sandbox")
+           .arg("--disable-setuid-sandbox");
+           
+        println!("Attempting to validate Chrome at: {:?}", resolved_path);
+        
+        match cmd.output() {
             Ok(output) => {
                 if output.status.success() {
-                    println!("Chrome validation successful: {}", String::from_utf8_lossy(&output.stdout).trim());
-                    Ok(path.to_string())
+                    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    println!("Chrome validation successful: {}", version);
+                    Ok(resolved_path.to_string_lossy().to_string())
                 } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    eprintln!("Chrome execution failed with status: {:?}", output.status);
+                    eprintln!("stderr: {}", stderr);
                     Err(ChromePathError::NotExecutable {
                         path: path.to_string(),
                     })
                 }
             }
-            Err(e) => Err(ChromePathError::ValidationFailed {
-                path: path.to_string(),
-                error: e.to_string(),
-            }),
+            Err(e) => {
+                eprintln!("Failed to execute Chrome binary: {}", e);
+                // Try with just the original path as a fallback
+                if path != resolved_path.to_string_lossy() {
+                    println!("Retrying with original path: {}", path);
+                    match Command::new(path).arg("--version").output() {
+                        Ok(output) if output.status.success() => {
+                            println!("Chrome validation successful with original path");
+                            return Ok(path.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                Err(ChromePathError::ValidationFailed {
+                    path: path.to_string(),
+                    error: e.to_string(),
+                })
+            }
         }
     }
 
@@ -98,7 +134,8 @@ impl PdfService {
         let mut tried_paths = Vec::new();
 
         // First, try the provided path if available
-        if let Some(path) = provided_path {
+        if let Some(path) = provided_path.clone() {
+            println!("Checking provided Chrome path: {}", path);
             tried_paths.push(path.clone());
             match Self::validate_chrome_path(&path) {
                 Ok(validated_path) => {
@@ -111,18 +148,55 @@ impl PdfService {
             }
         }
 
+        // Try to find Chrome using 'which' command as a fallback
+        println!("Attempting to find Chrome using 'which' command...");
+        if let Ok(output) = Command::new("which")
+            .arg("google-chrome-stable")
+            .output() 
+        {
+            if output.status.success() {
+                let chrome_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !chrome_path.is_empty() {
+                    println!("Found Chrome via 'which': {}", chrome_path);
+                    tried_paths.push(chrome_path.clone());
+                    if let Ok(validated_path) = Self::validate_chrome_path(&chrome_path) {
+                        println!("Using Chrome found via 'which': {}", validated_path);
+                        return Ok(validated_path);
+                    }
+                }
+            }
+        }
+
+        // Also try 'which chromium' and 'which chromium-browser'
+        for browser in &["chromium", "chromium-browser", "google-chrome"] {
+            if let Ok(output) = Command::new("which").arg(browser).output() {
+                if output.status.success() {
+                    let browser_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !browser_path.is_empty() && !tried_paths.contains(&browser_path) {
+                        println!("Found {} via 'which': {}", browser, browser_path);
+                        tried_paths.push(browser_path.clone());
+                        if let Ok(validated_path) = Self::validate_chrome_path(&browser_path) {
+                            println!("Using {} found via 'which': {}", browser, validated_path);
+                            return Ok(validated_path);
+                        }
+                    }
+                }
+            }
+        }
+
         // Try fallback paths
         println!("Trying fallback Chrome paths...");
         for &fallback_path in Self::CHROME_FALLBACK_PATHS {
-            tried_paths.push(fallback_path.to_string());
-            match Self::validate_chrome_path(fallback_path) {
-                Ok(validated_path) => {
-                    println!("Using fallback Chrome path: {}", validated_path);
-                    return Ok(validated_path);
-                }
-                Err(_) => {
-                    // Continue to next fallback, don't log every failure
-                    continue;
+            if !tried_paths.contains(&fallback_path.to_string()) {
+                tried_paths.push(fallback_path.to_string());
+                match Self::validate_chrome_path(fallback_path) {
+                    Ok(validated_path) => {
+                        println!("Using fallback Chrome path: {}", validated_path);
+                        return Ok(validated_path);
+                    }
+                    Err(e) => {
+                        eprintln!("Fallback path {} failed: {}", fallback_path, e);
+                    }
                 }
             }
         }
