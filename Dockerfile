@@ -1,5 +1,5 @@
 # Stage 1: Chef for dependency caching
-FROM rust:1.89-slim AS chef
+FROM rust:1.89-slim-bookworm AS chef
 RUN cargo install cargo-chef
 WORKDIR /app
 
