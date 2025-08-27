@@ -51,6 +51,8 @@ RUN apt-get update && \
         google-chrome-stable \
         fonts-liberation \
         fonts-noto-cjk \
+        fonts-noto \
+        fonts-noto-extra \
         --no-install-recommends && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
