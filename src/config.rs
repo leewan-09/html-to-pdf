@@ -15,6 +15,8 @@ pub struct Config {
     pub allowed_origins: Vec<String>,
     pub max_pdf_size_mb: usize,
     pub request_timeout_seconds: u64,
+    pub browser_pool_min: usize,
+    pub browser_pool_max: usize,
 }
 
 impl Config {
@@ -52,14 +54,28 @@ impl Config {
             .unwrap_or_else(|_| "30".to_string())
             .parse()
             .unwrap_or(30);
-        
-        Ok(Self { 
-            port, 
+
+        let browser_pool_min = env::var("BROWSER_POOL_MIN")
+            .unwrap_or_else(|_| "2".to_string())
+            .parse()
+            .unwrap_or(2)
+            .max(1); // At least 1 instance
+
+        let browser_pool_max = env::var("BROWSER_POOL_MAX")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse()
+            .unwrap_or(5)
+            .max(browser_pool_min); // Max must be >= min
+
+        Ok(Self {
+            port,
             chrome_path,
             rust_log,
             allowed_origins,
             max_pdf_size_mb,
             request_timeout_seconds,
+            browser_pool_min,
+            browser_pool_max,
         })
     }
 }

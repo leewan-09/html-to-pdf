@@ -18,13 +18,20 @@ use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = Config::from_env()
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     
     println!("Initializing PDF service...");
     println!("Chrome path from environment: {:?}", config.chrome_path);
-    let pdf_service = Arc::new(PdfService::new(config.chrome_path).await?);
+    println!("Browser pool configuration: min={}, max={}", config.browser_pool_min, config.browser_pool_max);
+    let pdf_service = Arc::new(
+        PdfService::new(
+            config.chrome_path.clone(),
+            config.browser_pool_min,
+            config.browser_pool_max
+        ).await?
+    );
     println!("PDF service initialized successfully!");
     let app = Router::new()
         .route("/", post(generate_pdf))
