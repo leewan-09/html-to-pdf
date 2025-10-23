@@ -46,11 +46,12 @@ struct BrowserInstance {
     last_used: Mutex<Instant>,
     usage_count: Mutex<usize>,
     is_healthy: Arc<RwLock<bool>>,
+    user_data_dir: std::path::PathBuf,
 }
 
 impl BrowserInstance {
     async fn new(chrome_path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let (browser, handler) = Self::launch_browser(chrome_path).await?;
+        let (browser, handler, user_data_dir) = Self::launch_browser(chrome_path).await?;
 
         // Spawn handler with health monitoring
         let browser_arc = Arc::new(browser);
@@ -80,10 +81,11 @@ impl BrowserInstance {
             last_used: Mutex::new(Instant::now()),
             usage_count: Mutex::new(0),
             is_healthy: browser_health,
+            user_data_dir,
         })
     }
 
-    async fn launch_browser(chrome_path: &str) -> Result<(Browser, chromiumoxide::Handler), Box<dyn std::error::Error + Send + Sync>> {
+    async fn launch_browser(chrome_path: &str) -> Result<(Browser, chromiumoxide::Handler, std::path::PathBuf), Box<dyn std::error::Error + Send + Sync>> {
         use std::time::{SystemTime, UNIX_EPOCH};
         use std::env;
 
@@ -117,9 +119,13 @@ impl BrowserInstance {
                 "--no-default-browser-check".to_string(),
                 "--headless".to_string(),
                 "--timezone=Indian/Maldives".to_string(),
+                // Resource limits
+                "--max-old-space-size=512".to_string(), // Limit V8 heap to 512MB
+                "--js-flags=--max-old-space-size=512".to_string(),
             ]);
 
-        Browser::launch(config.build()?).await.map_err(Into::into)
+        let (browser, handler) = Browser::launch(config.build()?).await?;
+        Ok((browser, handler, user_data_dir))
     }
 
     async fn is_healthy(&self) -> bool {
@@ -142,12 +148,35 @@ impl BrowserInstance {
     }
 }
 
+impl Drop for BrowserInstance {
+    fn drop(&mut self) {
+        let user_data_dir = self.user_data_dir.clone();
+
+        println!("Dropping browser instance - cleaning up resources");
+
+        // Spawn cleanup task to remove temp directory
+        tokio::spawn(async move {
+            // Wait a bit to ensure browser process has fully terminated
+            sleep(Duration::from_secs(2)).await;
+
+            // Remove the user data directory
+            if user_data_dir.exists() {
+                match std::fs::remove_dir_all(&user_data_dir) {
+                    Ok(_) => println!("Cleaned up browser temp directory: {:?}", user_data_dir),
+                    Err(e) => eprintln!("Failed to clean up temp directory {:?}: {}", user_data_dir, e),
+                }
+            }
+        });
+    }
+}
+
 /// Connection pool for browser instances
 struct BrowserPool {
     instances: Arc<Mutex<VecDeque<Arc<BrowserInstance>>>>,
     chrome_path: String,
     max_instances: usize,
     min_instances: usize,
+    consecutive_failures: Arc<Mutex<usize>>,
 }
 
 impl BrowserPool {
@@ -172,6 +201,7 @@ impl BrowserPool {
             chrome_path,
             max_instances,
             min_instances,
+            consecutive_failures: Arc::new(Mutex::new(0)),
         })
     }
 
@@ -196,6 +226,8 @@ impl BrowserPool {
             for instance in instances.iter() {
                 if instance.is_healthy().await && !instance.should_retire().await {
                     instance.mark_used().await;
+                    // Reset failure counter on success
+                    *self.consecutive_failures.lock().await = 0;
                     return Ok(Arc::clone(instance));
                 }
             }
@@ -208,10 +240,14 @@ impl BrowserPool {
                         let instance_arc = Arc::new(new_instance);
                         instance_arc.mark_used().await;
                         instances.push_back(Arc::clone(&instance_arc));
+                        // Reset failure counter on success
+                        *self.consecutive_failures.lock().await = 0;
                         return Ok(instance_arc);
                     }
                     Err(e) => {
                         eprintln!("Failed to create new browser instance: {}", e);
+                        // Increment failure counter
+                        *self.consecutive_failures.lock().await += 1;
                         if attempt < MAX_RETRIES - 1 {
                             // Wait before retry
                             drop(instances); // Release lock before sleeping
@@ -229,6 +265,18 @@ impl BrowserPool {
     }
 
     async fn maintain(&self) {
+        const MAX_CONSECUTIVE_FAILURES: usize = 10;
+
+        // Check circuit breaker - if too many failures, skip maintenance
+        let failure_count = *self.consecutive_failures.lock().await;
+        if failure_count >= MAX_CONSECUTIVE_FAILURES {
+            eprintln!(
+                "Maintenance: circuit breaker open ({} consecutive failures). Skipping maintenance cycle.",
+                failure_count
+            );
+            return;
+        }
+
         let mut instances = self.instances.lock().await;
 
         // Remove unhealthy and old instances
@@ -247,17 +295,42 @@ impl BrowserPool {
             println!("Maintenance: removed {} unhealthy/old browser instances", removed);
         }
 
-        // Ensure minimum instances
-        while instances.len() < self.min_instances {
-            drop(instances); // Release lock for instance creation
+        // Ensure minimum instances with circuit breaker
+        let mut maintenance_failures = 0;
+        const MAX_MAINTENANCE_ATTEMPTS: usize = 3;
+        drop(instances); // Release lock before creating instances
+
+        loop {
+            // Check current pool size
+            let current_len = self.instances.lock().await.len();
+
+            if current_len >= self.min_instances || maintenance_failures >= MAX_MAINTENANCE_ATTEMPTS {
+                break;
+            }
+
             match BrowserInstance::new(&self.chrome_path).await {
                 Ok(new_instance) => {
-                    instances = self.instances.lock().await;
+                    let mut instances = self.instances.lock().await;
                     instances.push_back(Arc::new(new_instance));
                     println!("Maintenance: added new browser instance");
+                    drop(instances);
+                    // Reset consecutive failures on success
+                    *self.consecutive_failures.lock().await = 0;
+                    maintenance_failures = 0; // Reset local counter too
                 }
                 Err(e) => {
                     eprintln!("Maintenance: failed to create browser instance: {}", e);
+                    maintenance_failures += 1;
+                    *self.consecutive_failures.lock().await += 1;
+
+                    if maintenance_failures >= MAX_MAINTENANCE_ATTEMPTS {
+                        let current_pool_size = self.instances.lock().await.len();
+                        eprintln!(
+                            "Maintenance: stopping after {} consecutive failures. Current pool size: {}",
+                            maintenance_failures,
+                            current_pool_size
+                        );
+                    }
                     break;
                 }
             }
@@ -268,6 +341,7 @@ impl BrowserPool {
 pub struct PdfService {
     pool: Arc<BrowserPool>,
     maintenance_handle: Option<tokio::task::JoinHandle<()>>,
+    shutdown_signal: Arc<tokio::sync::Notify>,
 }
 
 struct PageGuard {
@@ -462,20 +536,56 @@ impl PdfService {
         // Create browser pool with configured instances
         let pool = Arc::new(BrowserPool::new(validated_chrome_path, min_instances, max_instances).await?);
 
-        // Start maintenance task
+        // Create shutdown signal
+        let shutdown_signal = Arc::new(tokio::sync::Notify::new());
+
+        // Start maintenance task with shutdown awareness
         let pool_clone = Arc::clone(&pool);
+        let shutdown_clone = Arc::clone(&shutdown_signal);
         let maintenance_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
-                interval.tick().await;
-                pool_clone.maintain().await;
+                tokio::select! {
+                    _ = interval.tick() => {
+                        pool_clone.maintain().await;
+                    }
+                    _ = shutdown_clone.notified() => {
+                        println!("Maintenance task received shutdown signal");
+                        break;
+                    }
+                }
             }
         });
 
         Ok(Self {
             pool,
             maintenance_handle: Some(maintenance_handle),
+            shutdown_signal,
         })
+    }
+
+    /// Gracefully shutdown the PDF service and cleanup all resources
+    pub async fn shutdown(&self) {
+        println!("Shutting down PDF service...");
+
+        // Signal maintenance task to stop
+        self.shutdown_signal.notify_one();
+
+        // Wait a moment for maintenance to stop
+        sleep(Duration::from_millis(100)).await;
+
+        // Clear all browser instances from the pool
+        let mut instances = self.pool.instances.lock().await;
+        let count = instances.len();
+        instances.clear();
+        drop(instances);
+
+        println!("Cleared {} browser instances. Cleanup will happen via Drop trait.", count);
+
+        // Give some time for Drop cleanup to complete
+        sleep(Duration::from_secs(3)).await;
+
+        println!("PDF service shutdown complete");
     }
 
     pub async fn generate_pdf(&self, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

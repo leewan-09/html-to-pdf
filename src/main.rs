@@ -16,6 +16,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
+use tokio::signal;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -33,6 +34,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ).await?
     );
     println!("PDF service initialized successfully!");
+
+    // Clone pdf_service for shutdown handler before moving it
+    let pdf_service_for_shutdown = Arc::clone(&pdf_service);
+
     let app = Router::new()
         .route("/", post(generate_pdf))
         .layer(
@@ -42,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_state(pdf_service);
 
     // Add a health check route with JSON response
-    let app = app.route("/health", get(|| async { 
+    let app = app.route("/health", get(|| async {
         Json(json!({
             "status": "healthy",
             "service": "html-to-pdf-rust",
@@ -53,9 +58,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let addr = format!("0.0.0.0:{}", config.port);
     println!("Server running on {}", addr);
-    
+
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
-    
+
+    // Run server with graceful shutdown
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(pdf_service_for_shutdown))
+        .await?;
+
     Ok(())
+}
+
+/// Handle shutdown signals (SIGTERM, SIGINT) and cleanup resources
+async fn shutdown_signal(pdf_service: Arc<PdfService>) {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            println!("\nReceived Ctrl+C signal");
+        },
+        _ = terminate => {
+            println!("Received SIGTERM signal");
+        },
+    }
+
+    println!("Starting graceful shutdown...");
+
+    // Cleanup PDF service resources
+    pdf_service.shutdown().await;
+
+    println!("Graceful shutdown complete");
 }

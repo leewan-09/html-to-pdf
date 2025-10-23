@@ -62,13 +62,18 @@ RUN apt-get update && \
 # Set Chrome environment variable for the Rust app
 ENV CHROME_PATH=/usr/bin/google-chrome-stable
 
-# Create non-root user
+# Create non-root user with increased limits
 RUN groupadd -r -g 1001 appuser && \
     useradd -r -u 1001 -g appuser -d /home/appuser -s /sbin/nologin appuser && \
     mkdir -p /home/appuser && \
     chown -R appuser:appuser /home/appuser && \
     # Ensure /tmp is writable for Chrome user data dirs
-    chmod 1777 /tmp
+    chmod 1777 /tmp && \
+    # Configure system limits
+    echo "appuser soft nofile 65536" >> /etc/security/limits.conf && \
+    echo "appuser hard nofile 65536" >> /etc/security/limits.conf && \
+    echo "appuser soft nproc 4096" >> /etc/security/limits.conf && \
+    echo "appuser hard nproc 4096" >> /etc/security/limits.conf
 
 # Copy binary
 COPY --from=builder --chown=appuser:appuser /app/target/release/html-to-pdf-rust /usr/local/bin/html-to-pdf-rust
@@ -76,6 +81,10 @@ COPY --from=builder --chown=appuser:appuser /app/target/release/html-to-pdf-rust
 # Switch to non-root user
 USER appuser
 WORKDIR /home/appuser
+
+# Environment variables for resource limits
+ENV CHROME_DUMPDIR=/tmp
+ENV MALLOC_ARENA_MAX=2
 
 EXPOSE 5000
 
