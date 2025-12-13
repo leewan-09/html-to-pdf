@@ -7,6 +7,7 @@ use std::sync::Arc;
 use regex::Regex;
 use thiserror::Error;
 use once_cell::sync::Lazy;
+use tracing::info;
 
 static FILENAME_SANITIZER: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"[^a-zA-Z0-9._-]").expect("Invalid regex pattern for filename sanitization")
@@ -75,7 +76,7 @@ pub async fn generate_pdf(
     State(pdf_service): State<Arc<PdfService>>,
     Json(request): Json<PdfRequest>,
 ) -> Result<Response, AppError> {
-    println!("Generating PDF for {} from {}", request.name, request.url);
+    info!(name = %request.name, url = %request.url, "Generating PDF");
     
     // Validate request
     request.validate().map_err(AppError::Validation)?;
@@ -88,9 +89,11 @@ pub async fn generate_pdf(
     
     // Sanitize filename to prevent injection
     let safe_filename = sanitize_filename(&request.name);
-    let filename = format!("{}.pdf", safe_filename);
-    
-    // Build response
+    // Escape any quotes in filename for Content-Disposition header
+    let escaped_filename = safe_filename.replace('\\', "\\\\").replace('"', "\\\"");
+    let filename = format!("{}.pdf", escaped_filename);
+
+    // Build response with properly escaped filename
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/pdf")

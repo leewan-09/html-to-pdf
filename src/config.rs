@@ -1,5 +1,6 @@
 use std::env;
 use thiserror::Error;
+use tracing::warn;
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -45,27 +46,37 @@ impl Config {
             .map(|s| s.trim().to_string())
             .collect();
         
-        let max_pdf_size_mb = env::var("MAX_PDF_SIZE_MB")
-            .unwrap_or_else(|_| "10".to_string())
-            .parse()
-            .unwrap_or(10);
-        
-        let request_timeout_seconds = env::var("REQUEST_TIMEOUT_SECONDS")
-            .unwrap_or_else(|_| "30".to_string())
-            .parse()
-            .unwrap_or(30);
+        let max_pdf_size_mb = match env::var("MAX_PDF_SIZE_MB") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                warn!(value = %val, default = 10, "Invalid MAX_PDF_SIZE_MB, using default");
+                10
+            }),
+            Err(_) => 10,
+        };
 
-        let browser_pool_min = env::var("BROWSER_POOL_MIN")
-            .unwrap_or_else(|_| "2".to_string())
-            .parse()
-            .unwrap_or(2)
-            .max(1); // At least 1 instance
+        let request_timeout_seconds = match env::var("REQUEST_TIMEOUT_SECONDS") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                warn!(value = %val, default = 30, "Invalid REQUEST_TIMEOUT_SECONDS, using default");
+                30
+            }),
+            Err(_) => 30,
+        };
 
-        let browser_pool_max = env::var("BROWSER_POOL_MAX")
-            .unwrap_or_else(|_| "5".to_string())
-            .parse()
-            .unwrap_or(5)
-            .max(browser_pool_min); // Max must be >= min
+        let browser_pool_min = match env::var("BROWSER_POOL_MIN") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                warn!(value = %val, default = 2, "Invalid BROWSER_POOL_MIN, using default");
+                2
+            }).max(1),
+            Err(_) => 2,
+        };
+
+        let browser_pool_max = match env::var("BROWSER_POOL_MAX") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                warn!(value = %val, default = 5, "Invalid BROWSER_POOL_MAX, using default");
+                5
+            }).max(browser_pool_min),
+            Err(_) => 5.max(browser_pool_min),
+        };
 
         Ok(Self {
             port,

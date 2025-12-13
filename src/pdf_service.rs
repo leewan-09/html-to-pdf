@@ -10,6 +10,7 @@ use std::path::Path;
 use std::process::Command;
 use std::collections::VecDeque;
 use thiserror::Error;
+use tracing::{info, warn, error, debug};
 
 #[derive(Error, Debug)]
 pub enum ChromePathError {
@@ -37,6 +38,8 @@ pub enum PdfError {
     AllInstancesFailed,
     #[error("Chrome path error: {0}")]
     ChromePath(#[from] ChromePathError),
+    #[error("PDF size {size_mb:.2}MB exceeds limit of {limit_mb}MB")]
+    SizeExceeded { size_mb: f64, limit_mb: usize },
 }
 
 /// Browser instance with health tracking
@@ -62,7 +65,7 @@ impl BrowserInstance {
             let mut handler = handler;
             while let Some(h) = handler.next().await {
                 if let Err(e) = h {
-                    eprintln!("Browser handler error detected: {}", e);
+                    warn!(error = %e, "Browser handler error detected");
                     // Mark browser as unhealthy on connection errors
                     if e.to_string().contains("closed connection") ||
                        e.to_string().contains("WebSocket") {
@@ -71,7 +74,7 @@ impl BrowserInstance {
                     }
                 }
             }
-            eprintln!("Browser handler loop ended - marking as unhealthy");
+            warn!("Browser handler loop ended - marking as unhealthy");
             *health_clone.write().await = false;
         });
 
@@ -107,7 +110,6 @@ impl BrowserInstance {
             .args(vec![
                 "--disable-setuid-sandbox".to_string(),
                 "--disable-dev-shm-usage".to_string(),
-                "--disable-web-security".to_string(),
                 "--disable-features=VizDisplayCompositor".to_string(),
                 "--disable-gpu".to_string(),
                 "--disable-background-timer-throttling".to_string(),
@@ -152,21 +154,80 @@ impl Drop for BrowserInstance {
     fn drop(&mut self) {
         let user_data_dir = self.user_data_dir.clone();
 
-        println!("Dropping browser instance - cleaning up resources");
+        debug!("Dropping browser instance - cleaning up resources");
 
-        // Spawn cleanup task to remove temp directory
-        tokio::spawn(async move {
-            // Wait a bit to ensure browser process has fully terminated
-            sleep(Duration::from_secs(2)).await;
+        // Try to spawn cleanup task, fall back to sync cleanup if runtime unavailable
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    // Wait a bit to ensure browser process has fully terminated
+                    sleep(Duration::from_secs(2)).await;
 
-            // Remove the user data directory
-            if user_data_dir.exists() {
-                match std::fs::remove_dir_all(&user_data_dir) {
-                    Ok(_) => println!("Cleaned up browser temp directory: {:?}", user_data_dir),
-                    Err(e) => eprintln!("Failed to clean up temp directory {:?}: {}", user_data_dir, e),
+                    // Remove the user data directory
+                    if user_data_dir.exists() {
+                        match std::fs::remove_dir_all(&user_data_dir) {
+                            Ok(_) => debug!(path = ?user_data_dir, "Cleaned up browser temp directory"),
+                            Err(e) => warn!(path = ?user_data_dir, error = %e, "Failed to clean up temp directory"),
+                        }
+                    }
+                });
+            }
+            Err(_) => {
+                // Runtime not available, do sync cleanup
+                if user_data_dir.exists() {
+                    // Small sync sleep to let browser terminate
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if let Err(e) = std::fs::remove_dir_all(&user_data_dir) {
+                        // Can't use tracing here - runtime is gone, use eprintln as fallback
+                        eprintln!("Failed to clean up temp directory {:?}: {}", user_data_dir, e);
+                    }
                 }
             }
-        });
+        }
+    }
+}
+
+/// Circuit breaker state - combined into single struct to prevent deadlock from inconsistent lock ordering
+struct CircuitBreakerState {
+    consecutive_failures: usize,
+    /// Timestamp when circuit breaker was last tripped (for half-open recovery)
+    tripped_at: Option<Instant>,
+}
+
+impl CircuitBreakerState {
+    fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            tripped_at: None,
+        }
+    }
+
+    fn record_failure(&mut self, max_failures: usize) {
+        self.consecutive_failures += 1;
+        if self.consecutive_failures >= max_failures && self.tripped_at.is_none() {
+            self.tripped_at = Some(Instant::now());
+        }
+    }
+
+    fn reset(&mut self) {
+        self.consecutive_failures = 0;
+        self.tripped_at = None;
+    }
+
+    fn is_open(&self, max_failures: usize) -> bool {
+        self.consecutive_failures >= max_failures
+    }
+
+    fn should_attempt_recovery(&self, cooldown_secs: u64) -> bool {
+        if let Some(trip_time) = self.tripped_at {
+            trip_time.elapsed() >= Duration::from_secs(cooldown_secs)
+        } else {
+            false
+        }
+    }
+
+    fn reset_cooldown(&mut self) {
+        self.tripped_at = Some(Instant::now());
     }
 }
 
@@ -176,7 +237,8 @@ struct BrowserPool {
     chrome_path: String,
     max_instances: usize,
     min_instances: usize,
-    consecutive_failures: Arc<Mutex<usize>>,
+    /// Circuit breaker state - single lock to prevent deadlock
+    circuit_breaker: Arc<Mutex<CircuitBreakerState>>,
 }
 
 impl BrowserPool {
@@ -185,10 +247,10 @@ impl BrowserPool {
 
         // Create initial instances
         for i in 0..min_instances {
-            println!("Creating browser instance {} of {}", i + 1, min_instances);
+            info!(current = i + 1, total = min_instances, "Creating browser instance");
             match BrowserInstance::new(&chrome_path).await {
                 Ok(instance) => instances.push_back(Arc::new(instance)),
-                Err(e) => eprintln!("Failed to create initial browser instance: {}", e),
+                Err(e) => error!(error = %e, "Failed to create initial browser instance"),
             }
         }
 
@@ -201,7 +263,7 @@ impl BrowserPool {
             chrome_path,
             max_instances,
             min_instances,
-            consecutive_failures: Arc::new(Mutex::new(0)),
+            circuit_breaker: Arc::new(Mutex::new(CircuitBreakerState::new())),
         })
     }
 
@@ -211,43 +273,45 @@ impl BrowserPool {
         for attempt in 0..MAX_RETRIES {
             let mut instances = self.instances.lock().await;
 
-            // Remove unhealthy instances
-            instances.retain(|instance| {
-                let is_healthy = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(instance.is_healthy())
-                });
-                if !is_healthy {
-                    eprintln!("Removing unhealthy browser instance");
+            // Remove unhealthy instances - collect indices to remove first
+            let mut to_remove = Vec::new();
+            for (idx, instance) in instances.iter().enumerate() {
+                if !instance.is_healthy().await {
+                    warn!("Removing unhealthy browser instance");
+                    to_remove.push(idx);
                 }
-                is_healthy
-            });
+            }
+            // Remove in reverse order to preserve indices
+            for idx in to_remove.into_iter().rev() {
+                instances.remove(idx);
+            }
 
             // Try to find a healthy instance that shouldn't retire
             for instance in instances.iter() {
                 if instance.is_healthy().await && !instance.should_retire().await {
                     instance.mark_used().await;
-                    // Reset failure counter on success
-                    *self.consecutive_failures.lock().await = 0;
+                    // Reset circuit breaker on success
+                    self.circuit_breaker.lock().await.reset();
                     return Ok(Arc::clone(instance));
                 }
             }
 
             // Create new instance if needed and allowed
             if instances.len() < self.max_instances {
-                println!("Creating new browser instance (attempt {})", attempt + 1);
+                info!(attempt = attempt + 1, "Creating new browser instance");
                 match BrowserInstance::new(&self.chrome_path).await {
                     Ok(new_instance) => {
                         let instance_arc = Arc::new(new_instance);
                         instance_arc.mark_used().await;
                         instances.push_back(Arc::clone(&instance_arc));
-                        // Reset failure counter on success
-                        *self.consecutive_failures.lock().await = 0;
+                        // Reset circuit breaker on success
+                        self.circuit_breaker.lock().await.reset();
                         return Ok(instance_arc);
                     }
                     Err(e) => {
-                        eprintln!("Failed to create new browser instance: {}", e);
-                        // Increment failure counter
-                        *self.consecutive_failures.lock().await += 1;
+                        error!(error = %e, "Failed to create new browser instance");
+                        // Record failure in circuit breaker
+                        self.circuit_breaker.lock().await.record_failure(10);
                         if attempt < MAX_RETRIES - 1 {
                             // Wait before retry
                             drop(instances); // Release lock before sleeping
@@ -266,33 +330,84 @@ impl BrowserPool {
 
     async fn maintain(&self) {
         const MAX_CONSECUTIVE_FAILURES: usize = 10;
+        const CIRCUIT_BREAKER_RECOVERY_SECS: u64 = 120; // 2 minutes before attempting recovery
 
-        // Check circuit breaker - if too many failures, skip maintenance
-        let failure_count = *self.consecutive_failures.lock().await;
-        if failure_count >= MAX_CONSECUTIVE_FAILURES {
-            eprintln!(
-                "Maintenance: circuit breaker open ({} consecutive failures). Skipping maintenance cycle.",
-                failure_count
-            );
-            return;
+        // Check circuit breaker state - acquire lock once and release before any async work
+        {
+            let cb = self.circuit_breaker.lock().await;
+            if cb.is_open(MAX_CONSECUTIVE_FAILURES) {
+                let pool_size = self.instances.lock().await.len();
+
+                if !cb.should_attempt_recovery(CIRCUIT_BREAKER_RECOVERY_SECS) {
+                    // Still in cooldown period, skip maintenance
+                    let remaining = if let Some(trip_time) = cb.tripped_at {
+                        CIRCUIT_BREAKER_RECOVERY_SECS.saturating_sub(trip_time.elapsed().as_secs())
+                    } else {
+                        CIRCUIT_BREAKER_RECOVERY_SECS
+                    };
+                    warn!(
+                        failures = cb.consecutive_failures,
+                        pool_size = pool_size,
+                        recovery_in_secs = remaining,
+                        "Maintenance: circuit breaker open"
+                    );
+
+                    // If no trip time recorded, set it now
+                    if cb.tripped_at.is_none() {
+                        drop(cb);
+                        self.circuit_breaker.lock().await.reset_cooldown();
+                    }
+                    return;
+                }
+
+                // Half-open state: will attempt recovery after releasing lock
+                let elapsed = cb.tripped_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                drop(cb);
+
+                info!(
+                    cooldown_secs = elapsed,
+                    "Maintenance: circuit breaker half-open, attempting recovery"
+                );
+
+                match BrowserInstance::new(&self.chrome_path).await {
+                    Ok(new_instance) => {
+                        let mut instances = self.instances.lock().await;
+                        instances.push_back(Arc::new(new_instance));
+                        drop(instances);
+                        // Reset circuit breaker on success
+                        self.circuit_breaker.lock().await.reset();
+                        info!("Maintenance: circuit breaker RESET - recovery successful!");
+                        return;
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Maintenance: half-open recovery failed");
+                        // Reset the trip time to start a new cooldown period
+                        self.circuit_breaker.lock().await.reset_cooldown();
+                        return;
+                    }
+                }
+            }
         }
 
         let mut instances = self.instances.lock().await;
 
-        // Remove unhealthy and old instances
+        // Remove unhealthy and old instances - collect indices first
         let initial_count = instances.len();
-        instances.retain(|instance| {
-            let should_keep = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    instance.is_healthy().await && !instance.should_retire().await
-                })
-            });
-            should_keep
-        });
+        let mut to_remove = Vec::new();
+        for (idx, instance) in instances.iter().enumerate() {
+            let should_remove = !instance.is_healthy().await || instance.should_retire().await;
+            if should_remove {
+                to_remove.push(idx);
+            }
+        }
+        // Remove in reverse order to preserve indices
+        for idx in to_remove.into_iter().rev() {
+            instances.remove(idx);
+        }
 
         let removed = initial_count - instances.len();
         if removed > 0 {
-            println!("Maintenance: removed {} unhealthy/old browser instances", removed);
+            info!(count = removed, "Maintenance: removed unhealthy/old browser instances");
         }
 
         // Ensure minimum instances with circuit breaker
@@ -312,23 +427,24 @@ impl BrowserPool {
                 Ok(new_instance) => {
                     let mut instances = self.instances.lock().await;
                     instances.push_back(Arc::new(new_instance));
-                    println!("Maintenance: added new browser instance");
+                    info!("Maintenance: added new browser instance");
                     drop(instances);
-                    // Reset consecutive failures on success
-                    *self.consecutive_failures.lock().await = 0;
+                    // Reset circuit breaker on success
+                    self.circuit_breaker.lock().await.reset();
                     maintenance_failures = 0; // Reset local counter too
                 }
                 Err(e) => {
-                    eprintln!("Maintenance: failed to create browser instance: {}", e);
+                    error!(error = %e, "Maintenance: failed to create browser instance");
                     maintenance_failures += 1;
-                    *self.consecutive_failures.lock().await += 1;
+                    // Record failure in circuit breaker
+                    self.circuit_breaker.lock().await.record_failure(MAX_CONSECUTIVE_FAILURES);
 
                     if maintenance_failures >= MAX_MAINTENANCE_ATTEMPTS {
                         let current_pool_size = self.instances.lock().await.len();
-                        eprintln!(
-                            "Maintenance: stopping after {} consecutive failures. Current pool size: {}",
-                            maintenance_failures,
-                            current_pool_size
+                        error!(
+                            failures = maintenance_failures,
+                            pool_size = current_pool_size,
+                            "Maintenance: stopping after consecutive failures"
                         );
                     }
                     break;
@@ -340,8 +456,11 @@ impl BrowserPool {
 
 pub struct PdfService {
     pool: Arc<BrowserPool>,
-    maintenance_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Maintenance task handle - wrapped in Mutex to allow taking ownership during shutdown
+    maintenance_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown_signal: Arc<tokio::sync::Notify>,
+    /// Maximum PDF size in bytes (0 = unlimited)
+    max_pdf_size_bytes: usize,
 }
 
 struct PageGuard {
@@ -361,11 +480,15 @@ impl PageGuard {
 impl Drop for PageGuard {
     fn drop(&mut self) {
         let page = self.page.clone();
-        tokio::spawn(async move {
-            if let Err(e) = page.close().await {
-                eprintln!("Failed to close page: {}", e);
-            }
-        });
+        // Try to spawn cleanup task, silently skip if runtime unavailable
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(e) = page.close().await {
+                    warn!(error = %e, "Failed to close page");
+                }
+            });
+        }
+        // If runtime is gone, page will be cleaned up when browser closes
     }
 }
 
@@ -390,11 +513,11 @@ impl PdfService {
         let resolved_path = if path_buf.exists() {
             match std::fs::canonicalize(path_buf) {
                 Ok(p) => {
-                    println!("Resolved Chrome path: {} -> {}", path, p.display());
+                    debug!(original = %path, resolved = %p.display(), "Resolved Chrome path");
                     p
                 },
                 Err(e) => {
-                    println!("Warning: Could not resolve symlink for {}: {}", path, e);
+                    warn!(path = %path, error = %e, "Could not resolve symlink");
                     path_buf.to_path_buf()
                 }
             }
@@ -410,31 +533,30 @@ impl PdfService {
            .arg("--no-sandbox")
            .arg("--disable-setuid-sandbox");
 
-        println!("Attempting to validate Chrome at: {:?}", resolved_path);
+        debug!(path = ?resolved_path, "Attempting to validate Chrome");
 
         match cmd.output() {
             Ok(output) => {
                 if output.status.success() {
                     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    println!("Chrome validation successful: {}", version);
+                    info!(version = %version, "Chrome validation successful");
                     Ok(resolved_path.to_string_lossy().to_string())
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("Chrome execution failed with status: {:?}", output.status);
-                    eprintln!("stderr: {}", stderr);
+                    error!(status = ?output.status, stderr = %stderr, "Chrome execution failed");
                     Err(ChromePathError::NotExecutable {
                         path: path.to_string(),
                     })
                 }
             }
             Err(e) => {
-                eprintln!("Failed to execute Chrome binary: {}", e);
+                error!(error = %e, "Failed to execute Chrome binary");
                 // Try with just the original path as a fallback
                 if path != resolved_path.to_string_lossy() {
-                    println!("Retrying with original path: {}", path);
+                    debug!(path = %path, "Retrying with original path");
                     match Command::new(path).arg("--version").output() {
                         Ok(output) if output.status.success() => {
-                            println!("Chrome validation successful with original path");
+                            info!("Chrome validation successful with original path");
                             return Ok(path.to_string());
                         }
                         _ => {}
@@ -454,21 +576,21 @@ impl PdfService {
 
         // First, try the provided path if available
         if let Some(path) = provided_path.clone() {
-            println!("Checking provided Chrome path: {}", path);
+            debug!(path = %path, "Checking provided Chrome path");
             tried_paths.push(path.clone());
             match Self::validate_chrome_path(&path) {
                 Ok(validated_path) => {
-                    println!("Using provided Chrome path: {}", validated_path);
+                    info!(path = %validated_path, "Using provided Chrome path");
                     return Ok(validated_path);
                 }
                 Err(e) => {
-                    eprintln!("Provided Chrome path failed validation: {}", e);
+                    warn!(error = %e, "Provided Chrome path failed validation");
                 }
             }
         }
 
         // Try to find Chrome using 'which' command as a fallback
-        println!("Attempting to find Chrome using 'which' command...");
+        debug!("Attempting to find Chrome using 'which' command");
         if let Ok(output) = Command::new("which")
             .arg("google-chrome-stable")
             .output()
@@ -476,10 +598,10 @@ impl PdfService {
             if output.status.success() {
                 let chrome_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !chrome_path.is_empty() {
-                    println!("Found Chrome via 'which': {}", chrome_path);
+                    debug!(path = %chrome_path, "Found Chrome via 'which'");
                     tried_paths.push(chrome_path.clone());
                     if let Ok(validated_path) = Self::validate_chrome_path(&chrome_path) {
-                        println!("Using Chrome found via 'which': {}", validated_path);
+                        info!(path = %validated_path, "Using Chrome found via 'which'");
                         return Ok(validated_path);
                     }
                 }
@@ -492,10 +614,10 @@ impl PdfService {
                 if output.status.success() {
                     let browser_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if !browser_path.is_empty() && !tried_paths.contains(&browser_path) {
-                        println!("Found {} via 'which': {}", browser, browser_path);
+                        debug!(browser = %browser, path = %browser_path, "Found browser via 'which'");
                         tried_paths.push(browser_path.clone());
                         if let Ok(validated_path) = Self::validate_chrome_path(&browser_path) {
-                            println!("Using {} found via 'which': {}", browser, validated_path);
+                            info!(browser = %browser, path = %validated_path, "Using browser found via 'which'");
                             return Ok(validated_path);
                         }
                     }
@@ -504,23 +626,23 @@ impl PdfService {
         }
 
         // Try fallback paths
-        println!("Trying fallback Chrome paths...");
+        debug!("Trying fallback Chrome paths");
         for &fallback_path in Self::CHROME_FALLBACK_PATHS {
             if !tried_paths.contains(&fallback_path.to_string()) {
                 tried_paths.push(fallback_path.to_string());
                 match Self::validate_chrome_path(fallback_path) {
                     Ok(validated_path) => {
-                        println!("Using fallback Chrome path: {}", validated_path);
+                        info!(path = %validated_path, "Using fallback Chrome path");
                         return Ok(validated_path);
                     }
                     Err(e) => {
-                        eprintln!("Fallback path {} failed: {}", fallback_path, e);
+                        debug!(path = %fallback_path, error = %e, "Fallback path failed");
                     }
                 }
             }
         }
 
-        eprintln!("No valid Chrome installation found. Tried paths: {:?}", tried_paths);
+        error!(tried_paths = ?tried_paths, "No valid Chrome installation found");
         Err(ChromePathError::NoValidInstallation { paths: tried_paths })
     }
 
@@ -528,6 +650,7 @@ impl PdfService {
         chrome_path: Option<String>,
         min_instances: usize,
         max_instances: usize,
+        max_pdf_size_mb: usize,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Find and validate Chrome executable
         let validated_chrome_path = Self::find_chrome_executable(chrome_path)
@@ -550,29 +673,43 @@ impl PdfService {
                         pool_clone.maintain().await;
                     }
                     _ = shutdown_clone.notified() => {
-                        println!("Maintenance task received shutdown signal");
+                        info!("Maintenance task received shutdown signal");
                         break;
                     }
                 }
             }
         });
 
+        // Convert MB to bytes (0 means unlimited)
+        let max_pdf_size_bytes = max_pdf_size_mb * 1024 * 1024;
+
         Ok(Self {
             pool,
-            maintenance_handle: Some(maintenance_handle),
+            maintenance_handle: Mutex::new(Some(maintenance_handle)),
             shutdown_signal,
+            max_pdf_size_bytes,
         })
     }
 
     /// Gracefully shutdown the PDF service and cleanup all resources
     pub async fn shutdown(&self) {
-        println!("Shutting down PDF service...");
+        info!("Shutting down PDF service...");
 
         // Signal maintenance task to stop
         self.shutdown_signal.notify_one();
 
-        // Wait a moment for maintenance to stop
-        sleep(Duration::from_millis(100)).await;
+        // Take ownership of the maintenance handle and await it
+        if let Some(handle) = self.maintenance_handle.lock().await.take() {
+            debug!("Waiting for maintenance task to complete...");
+            match timeout(Duration::from_secs(5), handle).await {
+                Ok(Ok(())) => info!("Maintenance task completed successfully"),
+                Ok(Err(e)) => error!(error = %e, "Maintenance task panicked"),
+                Err(_) => {
+                    warn!("Maintenance task did not complete within timeout, aborting");
+                    // Handle was already consumed by timeout, so we can't abort it
+                }
+            }
+        }
 
         // Clear all browser instances from the pool
         let mut instances = self.pool.instances.lock().await;
@@ -580,12 +717,12 @@ impl PdfService {
         instances.clear();
         drop(instances);
 
-        println!("Cleared {} browser instances. Cleanup will happen via Drop trait.", count);
+        info!(count = count, "Cleared browser instances - cleanup via Drop trait");
 
         // Give some time for Drop cleanup to complete
         sleep(Duration::from_secs(3)).await;
 
-        println!("PDF service shutdown complete");
+        info!("PDF service shutdown complete");
     }
 
     pub async fn generate_pdf(&self, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -596,7 +733,7 @@ impl PdfService {
 
         for attempt in 0..MAX_RETRIES {
             if attempt > 0 {
-                println!("Retrying PDF generation (attempt {})", attempt + 1);
+                debug!(attempt = attempt + 1, "Retrying PDF generation");
                 // Exponential backoff
                 sleep(Duration::from_millis(100 * (2_u64.pow(attempt as u32)))).await;
             }
@@ -605,6 +742,7 @@ impl PdfService {
             let instance = match self.pool.get_healthy_instance().await {
                 Ok(inst) => inst,
                 Err(e) => {
+                    error!(attempt = attempt + 1, error = %e, "Failed to get browser instance");
                     last_error = Some(e.to_string());
                     continue;
                 }
@@ -648,12 +786,26 @@ impl PdfService {
 
             match timeout(PDF_TIMEOUT, generate_with_timeout).await {
                 Ok(Ok(pdf_data)) => {
-                    println!("PDF generated successfully on attempt {}", attempt + 1);
+                    // Check PDF size against limit
+                    if self.max_pdf_size_bytes > 0 && pdf_data.len() > self.max_pdf_size_bytes {
+                        let size_mb = pdf_data.len() as f64 / (1024.0 * 1024.0);
+                        let limit_mb = self.max_pdf_size_bytes / (1024 * 1024);
+                        error!(
+                            size_mb = size_mb,
+                            limit_mb = limit_mb,
+                            "PDF size exceeds configured limit"
+                        );
+                        return Err(format!(
+                            "PDF size {:.2}MB exceeds limit of {}MB",
+                            size_mb, limit_mb
+                        ).into());
+                    }
+                    info!(attempt = attempt + 1, size_bytes = pdf_data.len(), "PDF generated successfully");
                     return Ok(pdf_data);
                 }
                 Ok(Err(e)) => {
                     last_error = Some(e.to_string());
-                    eprintln!("PDF generation failed: {}", e);
+                    error!(error = %e, "PDF generation failed");
 
                     // If it's a browser connection issue, mark instance as unhealthy
                     if matches!(e, PdfError::BrowserConnectionLost | PdfError::PageCreationFailed(_)) {
@@ -662,22 +814,29 @@ impl PdfService {
                 }
                 Err(_) => {
                     last_error = Some("PDF generation timed out".to_string());
-                    eprintln!("PDF generation timed out");
+                    error!("PDF generation timed out");
                 }
             }
         }
 
-        Err(format!("PDF generation failed after {} attempts. Last error: {}",
+        let error_msg = format!("PDF generation failed after {} attempts. Last error: {}",
                    MAX_RETRIES,
-                   last_error.unwrap_or_else(|| "Unknown error".to_string())).into())
+                   last_error.unwrap_or_else(|| "Unknown error".to_string()));
+        error!(retries = MAX_RETRIES, error = %error_msg, "PDF generation failed after all attempts");
+        Err(error_msg.into())
     }
 }
 
 impl Drop for PdfService {
     fn drop(&mut self) {
-        // Cancel the maintenance task when service is dropped
-        if let Some(handle) = self.maintenance_handle.take() {
+        // Signal shutdown to maintenance task
+        self.shutdown_signal.notify_one();
+
+        // Try to abort the maintenance task if it hasn't been awaited via shutdown()
+        // We can use get_mut() since we have &mut self, avoiding async lock
+        if let Some(handle) = self.maintenance_handle.get_mut().take() {
             handle.abort();
+            debug!("Aborted maintenance task during PdfService drop");
         }
     }
 }

@@ -12,11 +12,12 @@ tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "net", "s
 tokio-util = { version = "0.7.16", features = ["time"] }
 dotenv = "0.15"
 tower = "0.4"
-tower-http = { version = "0.6.6", features = ["cors"] }
+tower-http = { version = "0.6.6", features = ["cors", "trace"] }
 futures-util = "0.3.31"
 url = "2.5.4"
 regex = "1.11.1"
 thiserror = "2.0.14"
 once_cell = "1.21.3"
-ipnet = "2.11.0"
 chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

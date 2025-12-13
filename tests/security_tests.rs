@@ -71,6 +71,80 @@ mod tests {
         };
         assert!(request.validate().is_ok());
     }
+
+    #[test]
+    fn test_request_validation_rejects_long_name() {
+        let request = PdfRequest {
+            name: "a".repeat(300),
+            url: "https://example.com".to_string(),
+        };
+        assert!(request.validate().is_err());
+    }
+
+    // Cloud metadata blocking tests
+    #[test]
+    fn test_url_validation_rejects_gcp_metadata() {
+        let json = r#"{"name": "test", "url": "http://metadata.google.internal/computeMetadata/v1/"}"#;
+        let result: Result<PdfRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_url_validation_rejects_aws_metadata_ip() {
+        let json = r#"{"name": "test", "url": "http://169.254.169.254/latest/meta-data/"}"#;
+        let result: Result<PdfRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_url_validation_rejects_internal_domain() {
+        let json = r#"{"name": "test", "url": "http://some-service.internal/api"}"#;
+        let result: Result<PdfRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_url_validation_rejects_metadata_subdomain() {
+        let json = r#"{"name": "test", "url": "http://metadata.example.com/"}"#;
+        let result: Result<PdfRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // Private IP tests
+    #[test]
+    fn test_url_validation_rejects_private_ip_10() {
+        let json = r#"{"name": "test", "url": "http://10.0.0.1/"}"#;
+        let result: Result<PdfRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_url_validation_rejects_private_ip_172() {
+        let json = r#"{"name": "test", "url": "http://172.16.0.1/"}"#;
+        let result: Result<PdfRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_url_validation_rejects_private_ip_192() {
+        let json = r#"{"name": "test", "url": "http://192.168.1.1/"}"#;
+        let result: Result<PdfRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_url_validation_rejects_loopback() {
+        let json = r#"{"name": "test", "url": "http://127.0.0.1/"}"#;
+        let result: Result<PdfRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_url_validation_rejects_ipv6_loopback() {
+        let json = r#"{"name": "test", "url": "http://[::1]/"}"#;
+        let result: Result<PdfRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
 }
 
 #[cfg(test)]
