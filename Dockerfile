@@ -36,27 +36,45 @@ RUN cargo build --release && \
 # Stage 4: Runtime
 FROM debian:bookworm-slim AS runtime
 
-# Install Chrome and dependencies
+# Pin Chrome version for chromiumoxide compatibility
+# Chrome 131 is stable and compatible with chromiumoxide 0.7
+ARG CHROME_VERSION=131.0.6778.204-1
+
+# Install Chrome (pinned version) and dependencies
 RUN apt-get update && \
     apt-get install -y \
         wget \
         gnupg \
         ca-certificates \
-        --no-install-recommends && \
-    wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | \
-    gpg --dearmor -o /usr/share/keyrings/googlechrome-linux-keyring.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome-linux-keyring.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google.list && \
-    apt-get update && \
-    apt-get install -y \
-        google-chrome-stable \
         fonts-liberation \
         fonts-noto-cjk \
         fonts-noto \
         fonts-noto-extra \
+        libasound2 \
+        libatk-bridge2.0-0 \
+        libatk1.0-0 \
+        libatspi2.0-0 \
+        libcups2 \
+        libdbus-1-3 \
+        libdrm2 \
+        libgbm1 \
+        libgtk-3-0 \
+        libnspr4 \
+        libnss3 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxfixes3 \
+        libxkbcommon0 \
+        libxrandr2 \
+        xdg-utils \
         --no-install-recommends && \
+    # Download and install pinned Chrome version
+    wget -q "https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}_amd64.deb" -O /tmp/chrome.deb && \
+    dpkg -i /tmp/chrome.deb || apt-get install -fy --no-install-recommends && \
+    rm /tmp/chrome.deb && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
-    # Verify Chrome is installed
+    # Verify Chrome version
     google-chrome-stable --version
 
 # Set Chrome environment variable for the Rust app

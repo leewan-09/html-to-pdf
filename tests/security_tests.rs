@@ -59,6 +59,7 @@ mod tests {
         let request = PdfRequest {
             name: "".to_string(),
             url: "https://example.com".to_string(),
+            options: None,
         };
         assert!(request.validate().is_err());
     }
@@ -68,6 +69,7 @@ mod tests {
         let request = PdfRequest {
             name: "valid-name".to_string(),
             url: "https://example.com".to_string(),
+            options: None,
         };
         assert!(request.validate().is_ok());
     }
@@ -77,6 +79,7 @@ mod tests {
         let request = PdfRequest {
             name: "a".repeat(300),
             url: "https://example.com".to_string(),
+            options: None,
         };
         assert!(request.validate().is_err());
     }

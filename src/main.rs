@@ -4,7 +4,7 @@ mod models;
 mod pdf_service;
 
 use config::Config;
-use handlers::generate_pdf;
+use handlers::{generate_pdf, generate_pdf_from_html};
 use pdf_service::PdfService;
 
 use axum::{
@@ -67,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let app = Router::new()
         .route("/", post(generate_pdf))
+        .route("/html", post(generate_pdf_from_html))
         .layer(ServiceBuilder::new().layer(cors))
         .with_state(pdf_service);
 

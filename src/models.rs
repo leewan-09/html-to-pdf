@@ -2,11 +2,62 @@ use serde::{Deserialize, Serialize, de};
 use url::Url;
 use std::net::{Ipv4Addr, Ipv6Addr, ToSocketAddrs, IpAddr};
 
+// ============================================================================
+// PDF Options (shared between URL and HTML endpoints)
+// ============================================================================
+
+#[derive(Deserialize, Clone, Default, Debug)]
+pub struct PdfMargin {
+    #[serde(default)]
+    pub top: Option<String>,
+    #[serde(default)]
+    pub right: Option<String>,
+    #[serde(default)]
+    pub bottom: Option<String>,
+    #[serde(default)]
+    pub left: Option<String>,
+}
+
+fn default_format() -> String {
+    "A4".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfOptions {
+    #[serde(default = "default_format")]
+    pub format: String,
+    #[serde(default = "default_true")]
+    pub print_background: bool,
+    #[serde(default)]
+    pub margin: Option<PdfMargin>,
+}
+
+impl Default for PdfOptions {
+    fn default() -> Self {
+        Self {
+            format: default_format(),
+            print_background: default_true(),
+            margin: None,
+        }
+    }
+}
+
+// ============================================================================
+// URL-based PDF Request
+// ============================================================================
+
 #[derive(Deserialize)]
 pub struct PdfRequest {
     pub name: String,
     #[serde(deserialize_with = "validate_url")]
     pub url: String,
+    #[serde(default)]
+    pub options: Option<PdfOptions>,
 }
 
 impl PdfRequest {
@@ -177,6 +228,45 @@ fn is_cloud_metadata_domain(domain: &str) -> bool {
     domain.ends_with(".internal") ||
     // Block metadata subdomains
     domain.starts_with("metadata.")
+}
+
+// ============================================================================
+// HTML-based PDF Request
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct HtmlPdfRequest {
+    pub name: String,
+    pub html: String,
+    #[serde(default)]
+    pub options: Option<PdfOptions>,
+}
+
+impl HtmlPdfRequest {
+    const MAX_HTML_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.is_empty() {
+            return Err("Name cannot be empty".to_string());
+        }
+
+        if self.name.len() > 256 {
+            return Err("Name too long (max 256 characters)".to_string());
+        }
+
+        if self.html.is_empty() {
+            return Err("HTML content cannot be empty".to_string());
+        }
+
+        if self.html.len() > Self::MAX_HTML_SIZE {
+            return Err(format!(
+                "HTML content too large (max {} MB)",
+                Self::MAX_HTML_SIZE / 1024 / 1024
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]

@@ -1,4 +1,4 @@
-use crate::models::{PdfRequest, ErrorResponse};
+use crate::models::{PdfRequest, HtmlPdfRequest, ErrorResponse};
 use crate::pdf_service::PdfService;
 use axum::{extract::State, http::StatusCode, response::Response, Json};
 use axum::body::Body;
@@ -76,17 +76,17 @@ pub async fn generate_pdf(
     State(pdf_service): State<Arc<PdfService>>,
     Json(request): Json<PdfRequest>,
 ) -> Result<Response, AppError> {
-    info!(name = %request.name, url = %request.url, "Generating PDF");
-    
+    info!(name = %request.name, url = %request.url, "Generating PDF from URL");
+
     // Validate request
     request.validate().map_err(AppError::Validation)?;
-    
-    // Generate PDF
+
+    // Generate PDF with options
     let pdf_data = pdf_service
-        .generate_pdf(&request.url)
+        .generate_pdf(&request.url, request.options.as_ref())
         .await
         .map_err(|e| AppError::PdfGeneration(e.to_string()))?;
-    
+
     // Sanitize filename to prevent injection
     let safe_filename = sanitize_filename(&request.name);
     // Escape any quotes in filename for Content-Disposition header
@@ -94,6 +94,34 @@ pub async fn generate_pdf(
     let filename = format!("{}.pdf", escaped_filename);
 
     // Build response with properly escaped filename
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/pdf")
+        .header("Content-Disposition", format!("inline; filename=\"{}\"", filename))
+        .body(Body::from(pdf_data))
+        .map_err(|_| AppError::ResponseBuilding)
+}
+
+pub async fn generate_pdf_from_html(
+    State(pdf_service): State<Arc<PdfService>>,
+    Json(request): Json<HtmlPdfRequest>,
+) -> Result<Response, AppError> {
+    info!(name = %request.name, html_len = request.html.len(), "Generating PDF from HTML");
+
+    // Validate request
+    request.validate().map_err(AppError::Validation)?;
+
+    // Generate PDF from HTML with options
+    let pdf_data = pdf_service
+        .generate_pdf_from_html(&request.html, request.options.as_ref())
+        .await
+        .map_err(|e| AppError::PdfGeneration(e.to_string()))?;
+
+    // Sanitize filename to prevent injection
+    let safe_filename = sanitize_filename(&request.name);
+    let escaped_filename = safe_filename.replace('\\', "\\\\").replace('"', "\\\"");
+    let filename = format!("{}.pdf", escaped_filename);
+
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/pdf")
