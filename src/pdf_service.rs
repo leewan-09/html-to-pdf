@@ -146,9 +146,34 @@ impl BrowserInstance {
     }
 
     async fn should_retire(&self) -> bool {
-        // Retire after 1 hour or 100 uses
-        self.age() > Duration::from_secs(3600) ||
-        *self.usage_count.lock().await > 100
+        // Retire after 20 minutes or 30 uses (aggressive recycling for stability)
+        self.age() > Duration::from_secs(1200) ||
+        *self.usage_count.lock().await > 30
+    }
+
+    async fn idle_time(&self) -> Duration {
+        self.last_used.lock().await.elapsed()
+    }
+
+    async fn is_idle_too_long(&self) -> bool {
+        // Recycle browsers idle for more than 5 minutes
+        self.idle_time().await > Duration::from_secs(300)
+    }
+
+    /// Quick health ping - verify browser is responsive via CDP
+    async fn health_ping(&self) -> bool {
+        // Try to get browser version - fast CDP call to verify connection
+        match timeout(Duration::from_secs(5), self.browser.version()).await {
+            Ok(Ok(_)) => true,
+            Ok(Err(e)) => {
+                warn!(error = %e, "Browser health ping failed");
+                false
+            }
+            Err(_) => {
+                warn!("Browser health ping timed out");
+                false
+            }
+        }
     }
 }
 
@@ -291,6 +316,12 @@ impl BrowserPool {
             // Try to find a healthy instance that shouldn't retire
             for instance in instances.iter() {
                 if instance.is_healthy().await && !instance.should_retire().await {
+                    // Pre-use health ping - verify browser is actually responsive
+                    if !instance.health_ping().await {
+                        warn!("Browser failed pre-use health ping, marking unhealthy");
+                        *instance.is_healthy.write().await = false;
+                        continue;
+                    }
                     instance.mark_used().await;
                     // Reset circuit breaker on success
                     self.circuit_breaker.lock().await.reset();
@@ -393,12 +424,23 @@ impl BrowserPool {
 
         let mut instances = self.instances.lock().await;
 
-        // Remove unhealthy and old instances - collect indices first
+        // Remove unhealthy, old, and idle instances - collect indices first
         let initial_count = instances.len();
         let mut to_remove = Vec::new();
         for (idx, instance) in instances.iter().enumerate() {
-            let should_remove = !instance.is_healthy().await || instance.should_retire().await;
-            if should_remove {
+            let is_unhealthy = !instance.is_healthy().await;
+            let should_retire = instance.should_retire().await;
+            // Only remove idle instances if we're above minimum pool size
+            let is_idle = instances.len() > self.min_instances && instance.is_idle_too_long().await;
+
+            if is_unhealthy || should_retire || is_idle {
+                if is_unhealthy {
+                    debug!("Marking instance for removal: unhealthy");
+                } else if should_retire {
+                    debug!("Marking instance for removal: should retire (age/uses)");
+                } else if is_idle {
+                    debug!("Marking instance for removal: idle too long");
+                }
                 to_remove.push(idx);
             }
         }
@@ -409,7 +451,7 @@ impl BrowserPool {
 
         let removed = initial_count - instances.len();
         if removed > 0 {
-            info!(count = removed, "Maintenance: removed unhealthy/old browser instances");
+            info!(count = removed, "Maintenance: removed unhealthy/old/idle browser instances");
         }
 
         // Ensure minimum instances with circuit breaker
@@ -717,11 +759,11 @@ impl PdfService {
         // Create shutdown signal
         let shutdown_signal = Arc::new(tokio::sync::Notify::new());
 
-        // Start maintenance task with shutdown awareness
+        // Start maintenance task with shutdown awareness (15 second interval for aggressive recycling)
         let pool_clone = Arc::clone(&pool);
         let shutdown_clone = Arc::clone(&shutdown_signal);
         let maintenance_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -860,8 +902,10 @@ impl PdfService {
                     }
                 }
                 Err(_) => {
+                    // Timeout - mark browser as unhealthy since it's likely stuck
+                    warn!("PDF generation timed out - marking browser instance as unhealthy");
+                    *instance.is_healthy.write().await = false;
                     last_error = Some("PDF generation timed out".to_string());
-                    error!("PDF generation timed out");
                 }
             }
         }
@@ -962,8 +1006,10 @@ impl PdfService {
                     }
                 }
                 Err(_) => {
+                    // Timeout - mark browser as unhealthy since it's likely stuck
+                    warn!("HTML PDF generation timed out - marking browser instance as unhealthy");
+                    *instance.is_healthy.write().await = false;
                     last_error = Some("HTML PDF generation timed out".to_string());
-                    error!("HTML PDF generation timed out");
                 }
             }
         }
