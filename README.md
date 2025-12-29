@@ -79,16 +79,18 @@ Both endpoints support an optional `options` object:
 |--------|------|---------|-------------|
 | `format` | string | `"A4"` | Paper format: `A4`, `Letter`, `Legal`, `A3`, `A5` |
 | `printBackground` | boolean | `true` | Include background colors and images |
-| `margin` | object | `null` | Page margins (see margin units below) |
+| `margin` | object | `0.4in` (~1cm) | Page margins (see margin units below) |
 
 ### Margin Units
 
 Margins can be specified with different units:
-- `"0"` - No margin
+- `"0"` - No margin (edge-to-edge)
 - `"1cm"` - Centimeters
 - `"10mm"` - Millimeters
 - `"0.5in"` - Inches
 - `"96px"` - Pixels
+
+**Note:** If margin is not specified, defaults to `0.4in` (~1cm) on all sides.
 
 ## Examples
 
