@@ -1,4 +1,4 @@
-use html_to_pdf_rust::{PdfRequest, ErrorResponse};
+use html_to_pdf_rust::{ErrorResponse, PdfRequest};
 use serde_json;
 
 #[cfg(test)]
@@ -87,7 +87,8 @@ mod tests {
     // Cloud metadata blocking tests
     #[test]
     fn test_url_validation_rejects_gcp_metadata() {
-        let json = r#"{"name": "test", "url": "http://metadata.google.internal/computeMetadata/v1/"}"#;
+        let json =
+            r#"{"name": "test", "url": "http://metadata.google.internal/computeMetadata/v1/"}"#;
         let result: Result<PdfRequest, _> = serde_json::from_str(json);
         assert!(result.is_err());
     }

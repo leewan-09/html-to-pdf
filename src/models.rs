@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize, de};
+use serde::{de, Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use url::Url;
-use std::net::{Ipv4Addr, Ipv6Addr, ToSocketAddrs, IpAddr};
 
 // ============================================================================
 // PDF Options (shared between URL and HTML endpoints)
@@ -89,7 +89,9 @@ impl PdfRequest {
             }
 
             // Resolve domain to IP addresses
-            let port = url.port().unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+            let port = url
+                .port()
+                .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
             let addr_str = format!("{}:{}", host, port);
 
             match addr_str.to_socket_addrs() {
@@ -131,33 +133,38 @@ where
     D: de::Deserializer<'de>,
 {
     let url_str = String::deserialize(deserializer)?;
-    
+
     // Parse URL to validate format
-    let url = Url::parse(&url_str)
-        .map_err(|_| de::Error::custom("Invalid URL format"))?;
-    
+    let url = Url::parse(&url_str).map_err(|_| de::Error::custom("Invalid URL format"))?;
+
     // Validate scheme - only allow http and https
     match url.scheme() {
-        "http" | "https" => {},
-        scheme => return Err(de::Error::custom(format!(
-            "Invalid URL scheme '{}'. Only 'http' and 'https' are allowed",
-            scheme
-        ))),
+        "http" | "https" => {}
+        scheme => {
+            return Err(de::Error::custom(format!(
+                "Invalid URL scheme '{}'. Only 'http' and 'https' are allowed",
+                scheme
+            )))
+        }
     }
-    
+
     // SSRF Protection: Check for private/internal networks
     if let Some(host) = url.host() {
         match host {
             url::Host::Ipv4(ip) => {
                 if is_private_ipv4(ip) {
-                    return Err(de::Error::custom("Access to private networks is not allowed"));
+                    return Err(de::Error::custom(
+                        "Access to private networks is not allowed",
+                    ));
                 }
-            },
+            }
             url::Host::Ipv6(ip) => {
                 if is_private_ipv6(ip) {
-                    return Err(de::Error::custom("Access to private networks is not allowed"));
+                    return Err(de::Error::custom(
+                        "Access to private networks is not allowed",
+                    ));
                 }
-            },
+            }
             url::Host::Domain(domain) => {
                 let domain_lower = domain.to_lowercase();
 
@@ -168,14 +175,16 @@ where
 
                 // Block cloud metadata service domains
                 if is_cloud_metadata_domain(&domain_lower) {
-                    return Err(de::Error::custom("Access to cloud metadata services is not allowed"));
+                    return Err(de::Error::custom(
+                        "Access to cloud metadata services is not allowed",
+                    ));
                 }
             }
         }
     } else {
         return Err(de::Error::custom("URL must have a valid host"));
     }
-    
+
     Ok(url_str)
 }
 
@@ -206,7 +215,8 @@ fn is_private_ipv6(ip: Ipv6Addr) -> bool {
 }
 
 fn is_localhost_domain(domain: &str) -> bool {
-    matches!(domain, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0" | "::") || domain.ends_with(".localhost")
+    matches!(domain, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0" | "::")
+        || domain.ends_with(".localhost")
 }
 
 /// Block cloud provider metadata service domains (AWS, GCP, Azure, etc.)

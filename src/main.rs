@@ -1,24 +1,19 @@
-mod config;
-mod handlers;
-mod models;
-mod pdf_service;
-
-use config::Config;
-use handlers::{generate_pdf, generate_pdf_from_html};
-use pdf_service::PdfService;
+use html_to_pdf_rust::config::Config;
+use html_to_pdf_rust::handlers::{generate_pdf, generate_pdf_from_html};
+use html_to_pdf_rust::pdf_service::PdfService;
 
 use axum::{
-    routing::{post, get},
-    Router,
+    http::{HeaderValue, Method},
     response::Json,
-    http::{Method, HeaderValue},
+    routing::{get, post},
+    Router,
 };
 use serde_json::json;
 use std::sync::Arc;
-use tower::ServiceBuilder;
-use tower_http::cors::{CorsLayer, Any};
 use tokio::signal;
-use tracing::{info, warn, error};
+use tower::ServiceBuilder;
+use tower_http::cors::{Any, CorsLayer};
+use tracing::{error, info}; // Removed unused 'warn'
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -29,19 +24,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let config = Config::from_env()
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    let config =
+        Config::from_env().map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     info!("Initializing PDF service...");
     info!(chrome_path = ?config.chrome_path, "Chrome path from environment");
-    info!(min = config.browser_pool_min, max = config.browser_pool_max, max_pdf_size_mb = config.max_pdf_size_mb, "Browser pool configuration");
+    info!(
+        min = config.browser_pool_min,
+        max = config.browser_pool_max,
+        max_pdf_size_mb = config.max_pdf_size_mb,
+        "Browser pool configuration"
+    );
     let pdf_service = Arc::new(
         PdfService::new(
             config.chrome_path.clone(),
             config.browser_pool_min,
             config.browser_pool_max,
             config.max_pdf_size_mb,
-        ).await?
+        )
+        .await?,
     );
     info!("PDF service initialized successfully!");
 
@@ -55,7 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
             .allow_headers(Any)
     } else {
-        let origins: Vec<HeaderValue> = config.allowed_origins
+        let origins: Vec<HeaderValue> = config
+            .allowed_origins
             .iter()
             .filter_map(|o| o.parse().ok())
             .collect();
@@ -72,14 +74,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_state(pdf_service);
 
     // Add a health check route with JSON response
-    let app = app.route("/health", get(|| async {
-        Json(json!({
-            "status": "healthy",
-            "service": "html-to-pdf-rust",
-            "timestamp": chrono::Utc::now().to_rfc3339()
-        }))
-    }));
-
+    let app = app.route(
+        "/health",
+        get(|| async {
+            Json(json!({
+                "status": "healthy",
+                "service": "html-to-pdf-rust",
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            }))
+        }),
+    );
 
     let addr = format!("0.0.0.0:{}", config.port);
     info!(address = %addr, "Server running");
@@ -110,7 +114,9 @@ async fn shutdown_signal(pdf_service: Arc<PdfService>) {
     #[cfg(unix)]
     let terminate = async {
         match signal::unix::signal(signal::unix::SignalKind::terminate()) {
-            Ok(mut sig) => { sig.recv().await; }
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
             Err(e) => {
                 error!(error = %e, "Failed to install SIGTERM handler");
                 std::future::pending::<()>().await;

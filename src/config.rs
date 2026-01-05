@@ -23,12 +23,12 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         dotenv::dotenv().ok();
-        
+
         let port_str = env::var("PORT").unwrap_or_else(|_| "5000".to_string());
         let port = port_str
             .parse::<u16>()
             .map_err(|_| ConfigError::InvalidPort(port_str))?;
-        
+
         // Validate port range
         if port < 1024 && port != 0 {
             return Err(ConfigError::InvalidPort(format!(
@@ -36,16 +36,16 @@ impl Config {
                 port
             )));
         }
-            
+
         let chrome_path = env::var("CHROME_PATH").ok();
         let rust_log = env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
-        
+
         let allowed_origins = env::var("ALLOWED_ORIGINS")
             .unwrap_or_else(|_| "*".to_string())
             .split(',')
             .map(|s| s.trim().to_string())
             .collect();
-        
+
         let max_pdf_size_mb = match env::var("MAX_PDF_SIZE_MB") {
             Ok(val) => val.parse().unwrap_or_else(|_| {
                 warn!(value = %val, default = 10, "Invalid MAX_PDF_SIZE_MB, using default");
@@ -63,18 +63,24 @@ impl Config {
         };
 
         let browser_pool_min = match env::var("BROWSER_POOL_MIN") {
-            Ok(val) => val.parse().unwrap_or_else(|_| {
-                warn!(value = %val, default = 2, "Invalid BROWSER_POOL_MIN, using default");
-                2
-            }).max(1),
+            Ok(val) => val
+                .parse()
+                .unwrap_or_else(|_| {
+                    warn!(value = %val, default = 2, "Invalid BROWSER_POOL_MIN, using default");
+                    2
+                })
+                .max(1),
             Err(_) => 2,
         };
 
         let browser_pool_max = match env::var("BROWSER_POOL_MAX") {
-            Ok(val) => val.parse().unwrap_or_else(|_| {
-                warn!(value = %val, default = 5, "Invalid BROWSER_POOL_MAX, using default");
-                5
-            }).max(browser_pool_min),
+            Ok(val) => val
+                .parse()
+                .unwrap_or_else(|_| {
+                    warn!(value = %val, default = 5, "Invalid BROWSER_POOL_MAX, using default");
+                    5
+                })
+                .max(browser_pool_min),
             Err(_) => 5.max(browser_pool_min),
         };
 
