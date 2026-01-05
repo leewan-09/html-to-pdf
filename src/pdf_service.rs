@@ -416,7 +416,26 @@ impl BrowserPool {
                         error!(error = %e, "Maintenance: half-open recovery failed");
                         // Reset the trip time to start a new cooldown period
                         self.circuit_breaker.lock().await.reset_cooldown();
-                        return;
+                        
+                        // We can't easily track persistent state across loop iterations without changing the struct
+                        // But we CAN check if this is happening repeatedly by looking at the circuit breaker stats or just failing hard now.
+                        // For simplicity in this patch: If we are in this half-open state and fail, it's serious. 
+                        // But let's look at how to implement the counter properly.
+                        // The loop is in `maintain`, which is called every 15s. We need state persistence.
+                        // Since `maintain` is called from a loop in `new`, and `maintain` returns `()`, we don't have local state persistence across calls easily.
+                        // ACTUALLY: The maintain function is called repeatedly. 
+                        
+                        // Let's force exit if we are in a really bad state. 
+                        // If we are half-open, it means we've already failed MAX_CONSECUTIVE_FAILURES (10) times + waited 120s.
+                        // If we fail again now, that's essentially 11 failures + wait.
+                        // If we want to be aggressive: exit now. 
+                        // If we want to try a few times: we need a counter in PdfService or CircuitBreakerState.
+                        
+                        // Given the user wants "restart if bad stuff happens", exiting on a failed recovery (which is already a rare, bad state) is safe.
+                        // It ensures we don't loop forever in "fail -> wait 120s -> fail -> wait 120s"
+                         
+                        error!("Fatal: Failed to recover browser pool from half-open state. Initiating self-healing restart.");
+                        std::process::exit(1);
                     }
                 }
             }
