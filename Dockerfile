@@ -67,6 +67,7 @@ RUN apt-get update && \
         libxkbcommon0 \
         libxrandr2 \
         xdg-utils \
+        tini \
         --no-install-recommends && \
     # Download and install pinned Chrome version
     wget -q "https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}_amd64.deb" -O /tmp/chrome.deb && \
@@ -106,4 +107,4 @@ ENV MALLOC_ARENA_MAX=2
 
 EXPOSE 5000
 
-ENTRYPOINT ["/usr/local/bin/html-to-pdf-rust"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/html-to-pdf-rust"]
